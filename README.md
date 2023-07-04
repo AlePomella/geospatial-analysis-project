@@ -1,4 +1,4 @@
-# geospatial-analysis-project
+# The state of accessibility to public psychological health in Italy
 This folder contains the project for the course "Geospatial Analysis and Representation for Data Science" on the state of accessibility to public mental health care in Italy.
 
 ## Aim of the project
