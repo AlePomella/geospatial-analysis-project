@@ -1,0 +1,414 @@
+---
+title: "The accessibility of mental health care services in Italy"
+subtitle: "A geographic analysis through measures of autocorrelation and spatial regression"
+author: "Geospatial analysis and representation course. A.Y. 2022/23. Alessandra Pomella"
+output:
+  html_document:
+    theme: readable
+    toc: yes
+    toc_float: yes
+    df_print: paged
+editor_options:
+  chink_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(tidy.opts = list(width.cutoff = 60),
+                      tidy = TRUE,
+                      warning = FALSE,
+                      message = FALSE,
+                      error = TRUE,
+                      collapse = TRUE,
+                      comment = "#>")
+```
+
+
+## Dependencies installation and loading
+```{r,warning=FALSE}
+# Installing packages not yet installed
+packages <- c("rgdal","spdep","ggplot2","readxl","tidyverse","dplyr","sf","sp","latticeExtra","RColorBrewer","spatialreg")
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed_packages])}
+
+# Packages loading
+invisible(lapply(packages, library, character.only = TRUE))
+```
+
+# Data loading
+
+1) Geographic data
+
+Option 1: Italian geographic data divided by region, source:Eurostat
+```{r}
+# Administrative boundaries: © EuroGeographics, © TurkStat. 
+# Source: European Commission – Eurostat/GISCO
+nutsrg <- read_sf("https://raw.githubusercontent.com/eurostat/Nuts2json/master/pub/v2/2021/3857/20M/nutsrg_2.json")
+nutsrg <- nutsrg[grepl("^IT", nutsrg$id), ]
+head(nutsrg)
+st_crs(nutsrg) <- 3857
+plot(nutsrg$geometry)
+EU_adm <- readOGR("data/NUTS_RG_20M_2021_3035","NUTS_RG_20M_2021_3035")
+italy_adm <- EU_adm[EU_adm$CNTR_CODE=='IT',]
+```
+
+Option 2: Italian geographic data divided by province, source:Istat
+The geographic data actually used will be those from Istat (option 2) since, in addition to the regional division, they also contain more  information with a provincial degree of detail, which is important for analysis (more specific information, larger sample).
+```{r}
+# Italian administrative boundaries updated to January 1, 2023.
+# The dataset is published by Istat under Creative Commons - Attribution - 3.0 licence.
+italy_provinces <- readOGR("data/Limiti01012023/ProvCM01012023","ProvCM01012023_WGS84")
+```
+We calculate and display centroids for each province.
+```{r}
+coords <- coordinates(italy_provinces)
+plot(italy_provinces)
+points(coords, col="red", cex=0.8)
+```
+
+In the following part, I proceed to integrate the **geographic data**, by province, with the respective data of **population** and presence and distribution of **Consultori** centers in the territory. "Consultori" centers are integrated social and health services with multidisciplinary expertise including free psychological care. They are here taken as a proxy for an accessible mental health care service.
+
+2) Consultori data
+
+In the following section I upload, clean, and aggregate by province the data on Consultori.
+The dataset below contains the list of healthcare facilities (public and accredited private) providing "family counseling" care services (Consultori familiari) - year 2022, made available by the Ministry of Health, under Italian [Open Data Licence](https://www.dati.gov.it/content/italian-open-data-license-v20).
+```{r}
+library("readxl")
+library("tidyverse")
+
+consultori <- read.csv('data/consultori_C_17_dataset_70_0_upFile.csv', sep = ";", header = TRUE)
+consultori <- consultori %>% drop_na(Anno)
+c <- consultori %>% group_by(Sigla.provincia) %>% count() 
+c <- c %>% rename('SIGLA'='Sigla.provincia','consultori'='n')
+c[107,][1] = 'NA'
+```
+
+Merging geographic and Consultori data by province.
+```{r}
+ITA_PRO <- merge(italy_provinces, c, by="SIGLA")
+```
+
+
+3) Population data
+
+The excel in use contains population data by province (sheet = 1) and the abbreviations (sigle) of the provinces (sheet = 2) through which to merge the datasets. I pre-process below population data by changing column names and nature of content (e.g., disambiguating the use of comma and period in the Italian versus international system), while also updating some rows (more details on this in the process).
+The data are obtained from the "HEALTH FOR ALL - ITALY" database system, provided by Istat. 
+[Health for all - Italy](https://www.istat.it/it/archivio/14562) (henceforth HFA) is a territorial information system on health and healthcare, structured in such a way that it can be queried by the HFA software provided by the World Health Organization adapted to different national systems (from H4A website). It contains about 4000 indicators and enables the composition of downloadable datasets, maps, and analyses. The datasets I will use for population, and then for addiction, unemployment and hospitalization rates, are composed and downloaded from H4A and available in the data folder. 
+```{r}
+pop_prov <- read_excel('data/pop_prov.xlsx',sheet = 1)
+prov_dic <- read_excel('data/pop_prov.xlsx',sheet = 2)
+```
+
+```{r}
+prov_dic <- prov_dic %>% select(Provincia_clean,Sigla) %>% rename(Provincia=Provincia_clean)
+pop_prov <- janitor::row_to_names(pop_prov, 1, remove_rows_above = T)
+```
+
+
+```{r}
+pop_prov$`Ultimo disponibile`<- gsub(",", ".", pop_prov$`Ultimo disponibile`)
+pop_prov[,5:6] <- sapply(pop_prov[,5:6],as.numeric)
+pop_prov <- pop_prov %>% select(Provincia, `Ultimo disponibile`,Anno_ultimo)
+```
+
+```{r}
+pop_prov[pop_prov$Provincia=="Reggio nell'Emilia",][1] <- 'Reggio Emilia'
+pop_prov[pop_prov$Provincia=="Reggio di Calabria",][1] <- 'Reggio Calabria'
+pop_prov[pop_prov$Provincia=="Medio-Campidano",][1] <- 'Medio Campidano'
+```
+
+The integration below is due to the reform of the Sardinian provinces (Legge Regionale n.2 del 4 febbraio 2016), which involved mergers and redistributions (more details below, in the section on regression). In summary, data on the former (now suppressed) provinces are to be merged into either newly created province (South Sardinia) or added to already existing ones (Sassari, Nuoro), since the H4A database does not report the updated provincial division unlike the geographic and Consultori data.
+```{r}
+pop_prov[pop_prov$Provincia=="Cagliari",][2] <- 421688
+pop_prov[pop_prov$Provincia=="Sassari",][2] <- 476516
+pop_prov[pop_prov$Provincia=="Nuoro",][2] <- 200376
+pop_prov[pop_prov$Provincia=="Oristano",][2] <- 151655
+pop_prov <- rbind(pop_prov,list("Provincia" = "Sud Sardegna","Ultimo disponibile" = 337178,"Anno_ultimo" = 2021))
+
+new_row <- list("Provincia" = "Sud Sardegna", "Sigla"="SU")
+prov_dic <- rbind(prov_dic,new_row)
+prov_dic
+```
+
+
+```{r}
+pop_prov_sigle <- left_join(prov_dic,pop_prov,by=("Provincia"="Provincia")) %>% rename(SIGLA=Sigla,Population=`Ultimo disponibile`)
+head(pop_prov_sigle)
+```
+Checking if there are any NAs left.
+```{r}
+pop_prov_sigle[is.na(pop_prov_sigle$Population)==TRUE,]
+```
+Merging geographic and Consultori data with population data, while checking for NAs.
+```{r}
+ITA_PRO <- merge(ITA_PRO,pop_prov_sigle,by='SIGLA')
+ITA_PRO@data[is.na(ITA_PRO$Population)==TRUE,]
+```
+```{r}
+ITA_PRO@data[is.na(ITA_PRO@data)==TRUE,]
+```
+
+I here add a new variable that encapsulates the ratio between resident population in the province and the number of Consultori ("pop/cons"), thus how many people a Consultorio alone serves, in the province in question. The variable "pc_disc" is then the discrete transformation of the previous one, for which I chose to use manual breaks following the information given by the distribution of the variable (checked with summary).
+```{r}
+ITA_PRO@data <- ITA_PRO@data %>% mutate("pop/cons"=Population%/%consultori)
+
+summary(ITA_PRO@data$`pop/cons`)
+
+ITA_PRO@data$pc_disc <- cut(ITA_PRO@data$`pop/cons`, breaks = c(9000, 10000,20000,30000, 40000, 50000, 100000), dig.lab = 10,include.lowest = TRUE,right=FALSE)
+```
+Inspecting the resulting dataframe.
+```{r}
+View(ITA_PRO@data)
+```
+
+# Choropleth map
+
+Areas with greater color intensity correspond to areas with less coverage by Consultori services (the more the province tends toward red, the fewer counseling services available; the choice was dictated by the fact that the association "few counseling services" -> "more problematic/alarming situation" could be intuitively intelligible).
+```{r}
+library(RColorBrewer)
+my.palette <- brewer.pal(n = 9, name = "OrRd")
+spplot(ITA_PRO,zcol="pc_disc",main="How many residents per consultorio?",sub="Province division", full='legenda',
+       col.regions = my.palette, sp.layout = list(
+        list("sp.polygons", ITA_PRO, first = TRUE, fill = "grey")))
+```
+
+Below, I re-plot the same choropleth map yet colored with a different palette, to highlight certain areas which in this way contrast more.
+```{r}
+spplot(ITA_PRO, "pc_disc", main = "How many residents per consultorio?", sub = "Province division", 
+    col = "transparent", sp.layout = list(
+        list("sp.polygons", ITA_PRO, first = TRUE, fill = "grey")))
+```
+
+# Spatial autocorrelation analysis
+
+Referring to the distances amongst centroids, we need to define the neighbourhood relationships among spatial units to determine who is close to whom, and what may be the mutual influences resulting from spatial proximity (set neighbourhood criterion, compute weights matrices, compute autocorrelation index).
+I apply the k-nearest neighbours, the critical cut-off neighbourhood, the contiguity-based neighbourhood definition of proximity, to then pick the critical cut-off one and compute spatial weights matrices.
+Then, I proceed to calculate the Moran's Index of autocorrelation for the variable "population per consultorio", and test its statistical significance. The last part of the section is dedicated to estimating any local autocorrelation patterns of the same variable.
+
+1) Define the proximity/neighbourhood relationships among spatial units
+Centroids
+```{r}
+coords <- coordinates(italy_provinces)
+plot(italy_provinces)
+points(coords, col="red", cex=0.8)
+```
+
+
+k-Nearest neighbours
+```{r}
+#knn1IT <- knn2nb(knearneigh(coords,k=5,longlat=TRUE))
+knn1IT <- knn2nb(knearneigh(coords,k=5))
+plot(italy_provinces, border="grey")
+plot(knn1IT, coords, add=TRUE)
+```
+
+
+Critical cut-off
+```{r}
+# knn1IT <- knn2nb(knearneigh(coords,k=1,longlat=T)) 
+knn1IT <- knn2nb(knearneigh(coords,k=1))
+
+# all.linkedT <- max(unlist(nbdists(knn1IT, coords,longlat=T))) 
+all.linkedT <- max(unlist(nbdists(knn1IT, coords)))
+all.linkedT
+```
+We can try different neighbourhood definitions for different values of the cut-off distance (> 75028.63, which resulted to be the minimum interprovincial distance for each province to have at least one neighbor)
+```{r}
+dnb75029 <- dnearneigh(coords, 0, 75029); dnb75029 
+dnb76000 <- dnearneigh(coords, 0, 76000); dnb76000
+dnb90000 <- dnearneigh(coords, 0, 90000); dnb90000
+```
+
+```{r}
+plot(italy_provinces, border="grey",xlab="",ylab="",xlim=NULL)
+title(main="Critical cut-off nearest neighbours, d = 90000") 
+plot(dnb90000, coords, add=TRUE, col="red")
+```
+
+
+Contiguity-based
+```{r}
+contnb_q <- poly2nb(italy_provinces, queen=T)
+contnb_q
+plot(italy_provinces, border="grey")
+plot(contnb_q, coords, add=TRUE)
+```
+
+
+2) Defining spatial weights and weights matrices
+```{r}
+dnb75029.listw <- nb2listw(dnb75029,style="W", zero.policy = TRUE)
+dnb76000.listw <- nb2listw(dnb76000,style="W", zero.policy = TRUE)
+dnb90000.listw <- nb2listw(dnb90000,style="W", zero.policy = TRUE)
+```
+
+
+# Global autocorrelation
+Moran's I test of spatial autocorrelation. 
+
+I try computing and testing Moran's index with the 3 cut-off distances and (a) with and (b) without randomization, and with (c) Monte-Carlo simulation.
+
+a) Without randomisation
+```{r}
+moran.test(ITA_PRO$`pop/cons`, dnb75029.listw, randomisation=FALSE, zero.policy = TRUE, na.action = na.exclude)
+moran.test(ITA_PRO$`pop/cons`, dnb76000.listw, randomisation=FALSE, zero.policy = TRUE, na.action = na.exclude)
+moran.test(ITA_PRO$`pop/cons`, dnb90000.listw, randomisation=FALSE, zero.policy = TRUE, na.action = na.exclude)
+```
+b) With randomisation
+```{r}
+moran.test(ITA_PRO$`pop/cons`, dnb75029.listw, randomisation=TRUE, zero.policy = TRUE, na.action = na.exclude)
+moran.test(ITA_PRO$`pop/cons`, dnb76000.listw, randomisation=TRUE, zero.policy = TRUE, na.action = na.exclude)
+moran.test(ITA_PRO$`pop/cons`, dnb90000.listw, randomisation=TRUE, zero.policy = TRUE, na.action = na.exclude)
+```
+c) With Monte-Carlo simulation
+```{r}
+moran.mc(ITA_PRO$`pop/cons`, dnb75029.listw, nsim=999,  zero.policy = TRUE, na.action = na.exclude)
+moran.mc(ITA_PRO$`pop/cons`, dnb76000.listw, nsim=999,  zero.policy = TRUE, na.action = na.exclude)
+moran.mc(ITA_PRO$`pop/cons`, dnb90000.listw, nsim=999,  zero.policy = TRUE, na.action = na.exclude)
+```
+Results are comparable across the three methods: only with wider neighborhood definition (90000m cut-off distance) the index is significant (p.value < 0.05), although still quantitatively low (e.g. 0.11256, with Monte Carlo simulation and 90000 of cut-off distance). The global autocorrelation value of the population-per-consultorio variable does not seem pronounced.
+
+# Local autocorrelation
+```{r}
+dnb9 <- dnearneigh(coordinates(ITA_PRO), 0, 90000)
+
+dnb9.listw <- nb2listw(dnb9,style="W",zero.policy=TRUE)
+mplot <- moran.plot(ITA_PRO$`pop/cons`, listw=dnb9.listw,  zero.policy=TRUE, main="Moran scatterplot", xlab="population/consultori", ylab="spatially lagged pop/consultori", return_df=F)
+grid()
+```
+```{r}
+hotspot <- as.numeric(row.names(as.data.frame(summary(mplot))))
+```
+
+```{r}
+ITA_PRO@data$wx <- lag.listw(dnb9.listw, ITA_PRO$`pop/cons`)
+```
+
+```{r}
+ITA_PRO@data$quadrant <- rep("None", length(ITA_PRO$`pop/cons`))
+for(i in 1:length(hotspot))  {
+  if (ITA_PRO$`pop/cons`[hotspot[i]]>mean(ITA_PRO$`pop/cons`) & ITA_PRO@data$wx[hotspot[i]]> mean(ITA_PRO@data$wx)) 
+        ITA_PRO@data$quadrant[hotspot[i]] <- "HH" 
+  if (ITA_PRO$`pop/cons`[hotspot[i]]>mean(ITA_PRO$`pop/cons`) & ITA_PRO@data$wx[hotspot[i]]< mean(ITA_PRO@data$wx)) 
+        ITA_PRO@data$quadrant[hotspot[i]] <- "HL" 
+  if (ITA_PRO$`pop/cons`[hotspot[i]]<mean(ITA_PRO$`pop/cons`) & ITA_PRO@data$wx[hotspot[i]]<mean(ITA_PRO@data$wx)) 
+        ITA_PRO@data$quadrant[hotspot[i]] <- "LL" 
+  if (ITA_PRO$`pop/cons`[hotspot[i]]<mean(ITA_PRO$`pop/cons`) & ITA_PRO@data$wx[hotspot[i]]>mean(ITA_PRO@data$wx)) 
+        ITA_PRO@data$quadrant[hotspot[i]] <- "LH" 
+  }
+table(ITA_PRO@data$quadrant)
+```
+```{r}
+ITA_PRO@data$colours[ITA_PRO@data$quadrant=="None"] <- "white" 
+ITA_PRO@data$colours[ITA_PRO@data$quadrant=="HH"] <- "black" 
+ITA_PRO@data$colours[ITA_PRO@data$quadrant=="LL"] <- gray(0.9) 
+ITA_PRO@data$colours[ITA_PRO@data$quadrant=="LH"] <- gray(0.4)
+ITA_PRO@data$colours[ITA_PRO@data$quadrant=="HL"] <- gray(0.7)
+plot(ITA_PRO, col=ITA_PRO@data$colours)
+legend(x=-10, y=73, legend=c("None", "Low-Low", "High-Low", "Low-High", "High-High"),
+                      fill=c("white", gray(0.9), gray(0.7), gray(0.4),
+                      "black"), bty="n", cex=0.8)
+title(main="Regions with influence")
+```
+```{r}
+lmI <- localmoran(ITA_PRO$`pop/cons`, dnb9.listw)
+
+brks <- sort(as.numeric(lmI[,1]))
+colours <- grey((0:length(lmI[,1]))/length(lmI[,1]))
+plot(ITA_PRO, col=colours[findInterval(lmI[,1], brks, all.inside=TRUE)])
+title(main="Local Moran's I values")
+```
+```{r}
+pval <- as.numeric(lmI[,5])
+ITA_PRO@data$colpval[pval>0.05] <- "white" 
+ITA_PRO@data$colpval[pval<=0.05 & pval>0.01] <- gray(0.9) 
+ITA_PRO@data$colpval[pval<=0.01 & pval>0.001] <- gray(0.7)
+ITA_PRO@data$colpval[pval<=0.001 & pval>0.0001] <- gray(0.4)
+ITA_PRO@data$colpval[pval<=0.0001] <- "black"
+```
+
+```{r}
+plot(ITA_PRO, col=ITA_PRO@data$colpval)
+legend(x=-10, y=73, legend=c("Not significant", 
+       "p-value = 0.05", "p-value = 0.01", "p-value = 0.001", 
+       "p-value = 0.0001"), fill=c("white", gray(0.9), gray(0.7),    
+       gray(0.4), "black"), bty="n", cex=0.8)
+title(main="Local Moran's I significance map")
+```
+
+
+Very few regions seem to have an influence (coefficients dimension), and the significance analysis (p-values) does not show many positive results. A result that appears to be confirmed by the distribution of points in the Moran scatterplot and by the subsequent analysis, where points located in quadrants identifying local patterns of strong positive or negative spatial autocorrelation are few.
+
+In summary, no relevant (index quantification) and significant (index testing) autocorrelation, neither global nor local, appears to exist for the variable under examination, with few exceptions.  
+
+# Multivariate spatial regression model
+
+For the regression part, I will use a dataset (again) taken from the ISTAT HFA database system. Here, as in the previous parts, a similar pre-processing procedure has to be done (e.g., regarding the reorganization of Sardinian provinces, data on the former provinces of Carbonia-Iglesias and Medio Campidano are to be merged into the newly created province of South Sardinia, while information on the former provinces of Olbia-Tempio and Ogliastra are to be merged into the province of Sassari and Nuoro, respectively*), since the H4A database does not report the updated provincial division, unlike the geographic and Consultori data.
+
+Regarding the definition of the regression model and the choice of the dependent and independent variables, I use here the "mortality rate from mental disorders" as Y-varable, and the unemployment rate, the hospitalization rate and the resident/consultori ratio as Xs-variables, to relate and investigate the correlation between mortality rate from mental disorders and some variables related to health services (population-to-consultorio ratio, hospitalization rate), controlling for a proxy of socioeconomic conditions (unemployment rate).
+The definition of the model from an interpretative point of view, has several limitations, but it can be used as a starting point for other developments (eg using different variables with different degree of approximation, refining the regression model).
+```{r}
+health_prov <- read_excel('data/regression_data.xlsx', sheet = 2)
+health_prov <- janitor::row_to_names(health_prov, 1, remove_rows_above = T)
+health_prov <- health_prov %>% rename(dp_rate=`Tasso mortalità disturbi psichici M+F`, 
+                                      suicide_rate=`Tasso mortalità sucidio,autolesione M+F`,
+                                      unempl_rate = `Tasso disoccupazione 15+ M+F`,
+                                      ospedalizz = `Tasso ospedalizzazione`)
+
+health_prov$dp_rate <- gsub(",", ".", health_prov$dp_rate)
+health_prov$suicide_rate <- gsub(",", ".", health_prov$suicide_rate)
+health_prov$unempl_rate <- gsub(",", ".", health_prov$unempl_rate)
+health_prov$ospedalizz <- gsub(",", ".", health_prov$ospedalizz)
+health_prov[,4:7] <- sapply(health_prov[,4:7],as.numeric)
+
+health_prov <- health_prov %>% select(Provincia, dp_rate, suicide_rate, unempl_rate, ospedalizz)
+health_prov
+```
+```{r}
+health_prov[health_prov$Provincia=="Reggio nell'Emilia",][1] <- 'Reggio Emilia'
+health_prov[health_prov$Provincia=="Reggio di Calabria",][1] <- 'Reggio Calabria'
+health_prov[health_prov$Provincia=="Medio-Campidano",][1] <- 'Medio Campidano'
+```
+
+*For OT and Ogliastra values, ithe process of merging data into Sassari and Nuoro values would require some reasoning around weights and modes, omitted here for reasons of time and space.
+For SU values, I simply take the mean of the Carbonia and Medio Campidano ex provinces.
+```{r}
+# for SU values, I simply take the mean of the Carbonia and Medio Campidano ex provinces
+health_prov <- rbind(health_prov,list("Provincia" = "Sud Sardegna", "dp_rate" = (5.25+5.29)/2 ,"suicide_rate" = (0.91+1.34)/2, "unempl_rate" = (27.80+20.58)/2 ,"ospedalizz" = (55.73+80.34)/2))
+```
+
+```{r}
+health_prov <- left_join(prov_dic,health_prov,by=("Provincia"="Provincia")) %>% rename(SIGLA=Sigla)
+```
+
+Merging the resulting dataset to integrate the obtained variables with previous ones (while also checking for NAs).
+```{r}
+ITA_PRO <- merge(ITA_PRO,health_prov,by='SIGLA')
+ITA_PRO@data[is.na(ITA_PRO$Population)==TRUE,]
+```
+
+## The Moran's I test of spatial autocorrelation in OLS residuals
+```{r}
+LinearSolow <- lm(dp_rate ~ unempl_rate + ospedalizz + `pop/cons`, ITA_PRO)
+summary(LinearSolow) 
+```
+```{r}
+studres <- rstudent(LinearSolow)
+resdistr <- quantile(studres) 
+colours <- grey((length(resdistr):2)/length(resdistr))
+plot(ITA_PRO, col=colours[findInterval(studres, resdistr, all.inside=TRUE)])
+```
+```{r}
+lm.morantest(LinearSolow,dnb75029.listw,resfun=rstudent)
+lm.morantest(LinearSolow,dnb70600.listw,resfun=rstudent)
+lm.morantest(LinearSolow,dnb90000.listw,resfun=rstudent)
+```
+The coefficients of unempl_rate and pop/cons appear to be significantly different from zero, and the Moran I for the regression residuals, whatever the matrix of weights according to different cut-off distances, turns out to be between 0.23 and 0.29 with p-values indicating significance.
+In order to develop interpretations and draw meaningful conclusions, a closer understanding of the composition of the indices and variables, as well as a greater understanding of interpretative social models of the phenomena under consideration, would be necessary.
+
+In this regard, it would be interesting and useful to deepen the interpretation and develop an analysis of the different possible spatial regression models in case of violation of the assumption of non-autocorrelation of the variables, which could not be developed here for reasons of time and space.
+
+
+
+
+
