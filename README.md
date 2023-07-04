@@ -17,6 +17,6 @@ The project was done in Colab; its use is recommended to ensure full functionali
 The following datasets are stored in the “data” folder
 -	Consultori dataset, provided by the Ministry of Health, under Italian Open Data Licence.
 -	Geographic data, provided by Istat, under Creative Commons - Attribution - 3.0 licence.
--	Population dataset (and regression_data dataset with other socio-demographic variables and indicators), provided by the Health for All database system by Istat (details in the R file). All datasets are stored and accessible in the “data” folder of the repository. To access the database system directly, a full guide is provided at https://www.istat.it/it/archivio/14562.
+-	Population dataset (and regression_data dataset with other socio-demographic variables and indicators), provided by the "Health for All" database system by Istat (details in the R file). All datasets are stored and accessible in the “data” folder of the repository. To access the database system directly, a full guide is provided at https://www.istat.it/it/archivio/14562.
 -	intermediate results about Consultori.
 
