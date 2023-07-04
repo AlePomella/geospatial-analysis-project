@@ -1,5 +1,5 @@
 # geospatial-analysis-project
-This folder contains the project for the course "Geospatial Analysis and Representation for Data Science" on accessibility to mental health care facilities in Italy.
+This folder contains the project for the course "Geospatial Analysis and Representation for Data Science" on the state of accessibility to public mental health care in Italy.
 
 ## Aim of the project
 The project was created with the idea of investigating the accessibility of public mental health care and treatment services in Italy. 
